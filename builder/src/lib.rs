@@ -35,6 +35,7 @@ fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream, syn::Error> 
         .iter()
         .map(create_builder_field)
         .collect::<Vec<TokenStream>>();
+    // eprintln!("builder_fields: {:#?}", builder_fields);
     let builder_setter_fns = fields
         .named
         .iter()
@@ -76,13 +77,12 @@ fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream, syn::Error> 
     };
 
     Ok(expanded)
+    // Ok(TokenStream::new())
 }
 
 fn create_builder_field(field: &Field) -> TokenStream {
-    eprintln!("{field:#?}");
     let ident = &field.ident;
     let ty = &field.ty;
-    eprintln!("{:#?}", unwrap_ty(ty, "Option"));
     if unwrap_ty(ty, "Option").is_some() {
         quote! { #ident: #ty }
     } else {
@@ -96,7 +96,7 @@ fn create_builder_setter_fn(field: &Field) -> TokenStream {
     if let Some(option_inner_type) = unwrap_ty(ty, "Option") {
         quote! {
             pub fn #ident(&mut self, #ident: #option_inner_type) -> &mut Self {
-                self.#ident = #ident;
+                self.#ident = ::std::option::Option::Some(#ident);
                 self
             }
         }
@@ -115,7 +115,7 @@ fn create_builder_default_field(field: &Field) -> TokenStream {
     quote! { #ident: ::std::option::Option::None }
 }
 
-fn create_builder_build_field(field: &syn::Field) -> proc_macro2::TokenStream {
+fn create_builder_build_field(field: &Field) -> TokenStream {
     let ident = &field.ident;
     let ty = &field.ty;
     if unwrap_ty(ty, "Option").is_some() {
