@@ -1,14 +1,14 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, AngleBracketedGenericArguments, Data, DataStruct, DeriveInput, Field,
+    parse_macro_input, AngleBracketedGenericArguments, Data, DataStruct, DeriveInput, Error, Field,
     Fields, GenericArgument, LitStr, Path, PathArguments, Type, TypePath,
 };
 
 const ATTR_NAME: &str = "builder";
 const EACH_ATTR_NAME: &str = "each";
 
-type Result<T> = std::result::Result<T, syn::Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn builder(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -109,25 +109,25 @@ fn create_builder_setter_fn(field: &Field) -> Option<TokenStream> {
     let ident = &field.ident;
     let ty = &field.ty;
     if let (Some(Ok(v)), Some(ident)) = (extract_each_value(field), ident) {
-            if format_ident!("{}", v.value()) == *ident {
-                return None;
-            }
+        if format_ident!("{}", v.value()) == *ident {
+            return None;
+        }
     }
 
     if let Some(option_inner_type) = inner_ty(ty, "Option") {
         Some(quote! {
-                    pub fn #ident(&mut self, #ident: #option_inner_type) -> &mut Self {
-                        self.#ident = ::std::option::Option::Some(#ident);
-                        self
-                    }
-                })
+            pub fn #ident(&mut self, #ident: #option_inner_type) -> &mut Self {
+                self.#ident = ::std::option::Option::Some(#ident);
+                self
+            }
+        })
     } else {
         Some(quote! {
-                    pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                        self.#ident = ::std::option::Option::Some(#ident);
-                        self
-                    }
-                })
+            pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                self.#ident = ::std::option::Option::Some(#ident);
+                self
+            }
+        })
     }
 }
 
@@ -217,9 +217,10 @@ fn extract_each_value(field: &Field) -> Option<Result<LitStr>> {
                     litstr = Some(v.parse::<LitStr>()?);
                     Ok(())
                 } else {
-                    Err(meta.error(format!(
-                        "expected `{ATTR_NAME}({EACH_ATTR_NAME} = \"...\")`"
-                    )))
+                    Err(Error::new_spanned(
+                        &attr.meta,
+                        format!("expected `{ATTR_NAME}({EACH_ATTR_NAME} = \"...\")`"),
+                    ))
                 }
             })
             .map(|_| litstr)
