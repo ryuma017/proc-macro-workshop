@@ -2,10 +2,15 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
     parse_macro_input, AngleBracketedGenericArguments, Data, DataStruct, DeriveInput, Field,
-    Fields, GenericArgument, Path, PathArguments, Type, TypePath,
+    Fields, GenericArgument, LitStr, Path, PathArguments, Type, TypePath,
 };
 
-#[proc_macro_derive(Builder)]
+const ATTR_NAME: &str = "builder";
+const EACH_ATTR_NAME: &str = "each";
+
+type Result<T> = std::result::Result<T, syn::Error>;
+
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn builder(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -14,7 +19,8 @@ pub fn builder(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         .into()
 }
 
-fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream, syn::Error> {
+fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream> {
+    // eprintln!("input: {:#?}", input);
     let ident = &input.ident;
     let fields = match &input.data {
         Data::Struct(DataStruct {
@@ -30,22 +36,31 @@ fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream, syn::Error> 
     };
 
     let builder_ident = format_ident!("{}Builder", ident, span = ident.span());
+
     let builder_fields = fields
         .named
         .iter()
         .map(create_builder_field)
         .collect::<Vec<TokenStream>>();
-    // eprintln!("builder_fields: {:#?}", builder_fields);
+
     let builder_setter_fns = fields
         .named
         .iter()
         .map(create_builder_setter_fn)
         .collect::<Vec<TokenStream>>();
+
+    let builder_each_setter_fns = fields
+        .named
+        .iter()
+        .filter_map(create_builder_each_setter_fn)
+        .collect::<Result<Vec<TokenStream>>>()?;
+
     let builder_default_fields = fields
         .named
         .iter()
         .map(create_builder_default_field)
         .collect::<Vec<TokenStream>>();
+
     let builder_build_fields = fields
         .named
         .iter()
@@ -59,6 +74,8 @@ fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream, syn::Error> 
 
         impl #builder_ident {
             #(#builder_setter_fns)*
+
+            #(#builder_each_setter_fns)*
 
             pub fn build(&mut self) -> ::std::result::Result<#ident, ::std::boxed::Box<dyn ::std::error::Error>> {
                 ::std::result::Result::Ok(#ident {
@@ -77,13 +94,12 @@ fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream, syn::Error> 
     };
 
     Ok(expanded)
-    // Ok(TokenStream::new())
 }
 
 fn create_builder_field(field: &Field) -> TokenStream {
     let ident = &field.ident;
     let ty = &field.ty;
-    if unwrap_ty(ty, "Option").is_some() {
+    if inner_ty(ty, "Option").is_some() {
         quote! { #ident: #ty }
     } else {
         quote! { #ident: ::std::option::Option<#ty> }
@@ -93,7 +109,7 @@ fn create_builder_field(field: &Field) -> TokenStream {
 fn create_builder_setter_fn(field: &Field) -> TokenStream {
     let ident = &field.ident;
     let ty = &field.ty;
-    if let Some(option_inner_type) = unwrap_ty(ty, "Option") {
+    if let Some(option_inner_type) = inner_ty(ty, "Option") {
         quote! {
             pub fn #ident(&mut self, #ident: #option_inner_type) -> &mut Self {
                 self.#ident = ::std::option::Option::Some(#ident);
@@ -110,6 +126,54 @@ fn create_builder_setter_fn(field: &Field) -> TokenStream {
     }
 }
 
+fn create_builder_each_setter_fn(field: &Field) -> Option<Result<TokenStream>> {
+    let ident = &field.ident;
+    eprintln!("ident: {ident:#?}");
+    let vec_inner_ty = inner_ty(&field.ty, "Vec")?;
+    eprintln!("vec_inner_ty: {vec_inner_ty:#?}");
+    let each_value_litstr = field.attrs.iter().find_map(|attr| {
+        if attr.path().is_ident(ATTR_NAME) {
+            let mut litstr = None::<LitStr>;
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident(EACH_ATTR_NAME) {
+                    let v = meta.value()?;
+                    litstr = Some(v.parse::<LitStr>()?);
+                    Ok(())
+                } else {
+                    Err(meta.error(format!(
+                        "expected `{ATTR_NAME}({EACH_ATTR_NAME} = \"...\")`"
+                    )))
+                }
+            })
+            .map(|_| litstr)
+            .transpose()
+        } else {
+            None
+        }
+    });
+
+    match each_value_litstr {
+        Some(Ok(litstr)) => {
+            let each_value_ident = format_ident!("{}", litstr.value());
+            Some(Ok(quote! {
+                pub fn #each_value_ident(&mut self, #each_value_ident: #vec_inner_ty) -> &mut Self {
+                    match self.#ident {
+                        ::std::option::Option::Some(ref mut v) => v.push(#each_value_ident),
+                        ::std::option::Option::None => {
+                            self.#ident = ::std::option::Option::Some(
+                                vec![#each_value_ident]
+                            );
+                        }
+                    }
+                    self
+                }
+            }))
+        }
+        Some(Err(e)) => Some(Err(e)),
+        None => None,
+    }
+}
+
 fn create_builder_default_field(field: &Field) -> TokenStream {
     let ident = &field.ident;
     quote! { #ident: ::std::option::Option::None }
@@ -118,7 +182,7 @@ fn create_builder_default_field(field: &Field) -> TokenStream {
 fn create_builder_build_field(field: &Field) -> TokenStream {
     let ident = &field.ident;
     let ty = &field.ty;
-    if unwrap_ty(ty, "Option").is_some() {
+    if inner_ty(ty, "Option").is_some() {
         quote! {
             #ident: self.#ident.clone()
         }
@@ -130,7 +194,7 @@ fn create_builder_build_field(field: &Field) -> TokenStream {
 }
 
 // ex.) Option<String> -> Some("String"), Vec<String> -> Some("String")
-fn unwrap_ty<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
+fn inner_ty<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
     match ty {
         Type::Path(TypePath {
             path: Path { segments, .. },
