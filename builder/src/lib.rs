@@ -20,7 +20,6 @@ pub fn builder(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream> {
-    // eprintln!("input: {:#?}", input);
     let ident = &input.ident;
     let fields = match &input.data {
         Data::Struct(DataStruct {
@@ -46,7 +45,7 @@ fn expand_derive_builder(input: DeriveInput) -> Result<TokenStream> {
     let builder_setter_fns = fields
         .named
         .iter()
-        .map(create_builder_setter_fn)
+        .filter_map(create_builder_setter_fn)
         .collect::<Vec<TokenStream>>();
 
     let builder_each_setter_fns = fields
@@ -106,51 +105,36 @@ fn create_builder_field(field: &Field) -> TokenStream {
     }
 }
 
-fn create_builder_setter_fn(field: &Field) -> TokenStream {
+fn create_builder_setter_fn(field: &Field) -> Option<TokenStream> {
     let ident = &field.ident;
     let ty = &field.ty;
+    if let (Some(Ok(v)), Some(ident)) = (extract_each_value(field), ident) {
+            if format_ident!("{}", v.value()) == *ident {
+                return None;
+            }
+    }
+
     if let Some(option_inner_type) = inner_ty(ty, "Option") {
-        quote! {
-            pub fn #ident(&mut self, #ident: #option_inner_type) -> &mut Self {
-                self.#ident = ::std::option::Option::Some(#ident);
-                self
-            }
-        }
+        Some(quote! {
+                    pub fn #ident(&mut self, #ident: #option_inner_type) -> &mut Self {
+                        self.#ident = ::std::option::Option::Some(#ident);
+                        self
+                    }
+                })
     } else {
-        quote! {
-            pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                self.#ident = ::std::option::Option::Some(#ident);
-                self
-            }
-        }
+        Some(quote! {
+                    pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                        self.#ident = ::std::option::Option::Some(#ident);
+                        self
+                    }
+                })
     }
 }
 
 fn create_builder_each_setter_fn(field: &Field) -> Option<Result<TokenStream>> {
     let ident = &field.ident;
-    eprintln!("ident: {ident:#?}");
     let vec_inner_ty = inner_ty(&field.ty, "Vec")?;
-    eprintln!("vec_inner_ty: {vec_inner_ty:#?}");
-    let each_value_litstr = field.attrs.iter().find_map(|attr| {
-        if attr.path().is_ident(ATTR_NAME) {
-            let mut litstr = None::<LitStr>;
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident(EACH_ATTR_NAME) {
-                    let v = meta.value()?;
-                    litstr = Some(v.parse::<LitStr>()?);
-                    Ok(())
-                } else {
-                    Err(meta.error(format!(
-                        "expected `{ATTR_NAME}({EACH_ATTR_NAME} = \"...\")`"
-                    )))
-                }
-            })
-            .map(|_| litstr)
-            .transpose()
-        } else {
-            None
-        }
-    });
+    let each_value_litstr = extract_each_value(field);
 
     match each_value_litstr {
         Some(Ok(litstr)) => {
@@ -186,6 +170,10 @@ fn create_builder_build_field(field: &Field) -> TokenStream {
         quote! {
             #ident: self.#ident.clone()
         }
+    } else if inner_ty(ty, "Vec").is_some() {
+        quote! {
+            #ident: self.#ident.clone().unwrap_or_default()
+        }
     } else {
         quote! {
             #ident: self.#ident.clone().ok_or(concat!(stringify!(#ident), " is not set."))?
@@ -217,4 +205,27 @@ fn inner_ty<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
         }),
         _ => None,
     }
+}
+
+fn extract_each_value(field: &Field) -> Option<Result<LitStr>> {
+    field.attrs.iter().find_map(|attr| {
+        if attr.path().is_ident(ATTR_NAME) {
+            let mut litstr = None::<LitStr>;
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident(EACH_ATTR_NAME) {
+                    let v = meta.value()?;
+                    litstr = Some(v.parse::<LitStr>()?);
+                    Ok(())
+                } else {
+                    Err(meta.error(format!(
+                        "expected `{ATTR_NAME}({EACH_ATTR_NAME} = \"...\")`"
+                    )))
+                }
+            })
+            .map(|_| litstr)
+            .transpose()
+        } else {
+            None
+        }
+    })
 }
